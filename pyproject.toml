@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comfyui-qwen3-tts-quant"
+version = "0.1.5"
+description = "W8A8 ConvRot Qwen3-TTS VoiceDesign runtime and ComfyUI nodes"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+  "safetensors>=0.4.5",
+  "huggingface-hub>=0.25",
+]
+
+[project.scripts]
+qwen3-tts-quantize = "qwen3_tts_quantizer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["q3tts_quant*", "qwen3_tts_quantizer*", "nodes*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
