@@ -14,6 +14,22 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(restored.to_dict(), original.to_dict())
         self.assertIn("q3tts.metadata", restored.safetensors_metadata())
 
+    def test_variant_round_trip(self):
+        original = QuantizationMetadata(
+            architecture="qwen3_tts_base_v1",
+            model_variant="base",
+            original_model="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        )
+        restored = QuantizationMetadata.from_json(original.to_json())
+        self.assertEqual(restored.architecture, "qwen3_tts_base_v1")
+        self.assertEqual(restored.model_variant, "base")
+
+    def test_legacy_voice_design_metadata_remains_loadable(self):
+        raw = QuantizationMetadata().to_dict()
+        raw.pop("model_variant")
+        restored = QuantizationMetadata.from_dict(raw)
+        self.assertEqual(restored.model_variant, "voice_design")
+
 
 if __name__ == "__main__":
     unittest.main()

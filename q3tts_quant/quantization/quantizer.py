@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..adapters import Qwen3TTSVoiceDesignAdapter
+from ..adapters import Qwen3TTS17BAdapter
 from ..errors import BackendUnavailableError, CheckpointError
 from .metadata import QuantizationMetadata, QuantizedLayer, encode_comfy_marker
 from .source import load_config, resolve_model_source
@@ -101,7 +101,7 @@ def quantize_model(
     source = resolve_model_source(model, revision=revision, config_dir=config_dir)
     config = load_config(source)
     specs = list(source.iter_tensor_specs())
-    adapter = Qwen3TTSVoiceDesignAdapter()
+    adapter = Qwen3TTS17BAdapter.from_config(config)
     adapter.validate_checkpoint(config, (name for name, _, _ in specs))
 
     decisions = {name: adapter.classify_tensor(name, shape) for name, shape, _ in specs}
@@ -109,6 +109,8 @@ def quantize_model(
     _prepare_output(output_path, force)
 
     metadata = QuantizationMetadata(
+        architecture=adapter.adapter_id,
+        model_variant=adapter.variant,
         original_model=source.model_id,
         source_revision=source.revision,
         source_fingerprint=source.fingerprint(),

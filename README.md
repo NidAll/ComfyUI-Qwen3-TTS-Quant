@@ -1,172 +1,303 @@
 # ComfyUI-Qwen3-TTS-Quant
 
-A native ComfyUI runtime and streaming quantization toolkit for
-[`Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign`](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign).
+A native ComfyUI node pack and streaming quantization toolkit for the complete
+**Qwen3-TTS 12 Hz 1.7B family**.
 
-The project runs the latency-critical Talker and Code Predictor through **W8A8 ConvRot Comfy
-Kitchen CUDA kernels**, keeps quantized weights packed during inference, and supports captured
-FlashAttention 2 KV-cache decode. The speech decoder remains FP16 to preserve reconstruction
+One runtime now supports every official 1.7B generation mode:
+
+| Model | Capability | ComfyUI node |
+|---|---|---|
+| [Qwen3-TTS-12Hz-1.7B-VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) | Create a voice from a natural-language description | Qwen3 TTS Voice Design |
+| [Qwen3-TTS-12Hz-1.7B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) | Clone a voice from reference audio | Qwen3 TTS Voice Clone |
+| [Qwen3-TTS-12Hz-1.7B-CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) | Generate speech with official named speakers and style instructions | Qwen3 TTS Custom Voice |
+
+The latency-critical Talker and Code Predictor use packed **W8A8 ConvRot**
+weights through Comfy Kitchen. Quantized weights remain packed during inference.
+The speech tokenizer stays in FP16 by default to protect waveform reconstruction
 quality.
 
-> **v0.1.6:** FlashAttention 2 and CUDA graphs now work together through an instance-local
-> `flash_attn_with_kvcache` adapter. Local validation reached **2.79 to 2.84× realtime** during
-> acoustic generation and approximately **2.52× realtime end to end** after graph warmup.
+## Features
 
-## Validated performance
+- Full support for VoiceDesign, Base voice cloning, and CustomVoice
+- Streaming conversion from Hugging Face or local checkpoints
+- Architecture-aware W8A8 ConvRot quantization
+- Single-file `model.safetensors` layout as the recommended default
+- Packed INT8 weights throughout model loading and inference
+- Comfy Kitchen CUDA backend integration
+- FlashAttention 2 and SDPA attention modes
+- Static KV caches for the Talker and Code Predictor
+- CUDA graph acceleration with explicit feature detection and fallback reporting
+- Persistent decode buffers for batch-1 autoregressive generation
+- CPU selective-gather text embeddings
+- Reusable voice-clone prompt cache
+- Deterministic sampling controls and generation telemetry
+- Explicit model unloading and CUDA resource cleanup
+- No ComfyUI core modifications
 
-The following measurements come from repeated VoiceDesign generations with W8A8 ConvRot, BF16
-transformer compute, an FP16 codec, FlashAttention 2, and captured CUDA graphs.
+## Supported checkpoint layout
 
-| Run | Audio produced | Acoustic generation | Acoustic speed | Full ComfyUI prompt | End-to-end speed | End-to-end RTF |
-|---|---:|---:|---:|---:|---:|---:|
-| Initial capture | 15.92 s | 5.61 s | 2.84× | 10.24 s | 1.55× | 0.643 |
-| Warm run | 26.00 s | 9.15 s | 2.84× | 10.32 s | 2.52× | 0.397 |
-| Warm run | 16.42 s | 5.88 s | 2.79× | 6.52 s | 2.52× | 0.397 |
-
-The initial run includes CUDA graph capture and startup work. Warm runs reuse the model, graph
-pools, static KV cache, and persistent decode buffers. Results vary with prompt length, generated
-duration, software versions, GPU, and power limits.
-
-The fastest validated configuration in the current development run is:
+The recommended layout keeps one root safetensors file:
 
 ```text
-Quantization       W8A8 ConvRot
-Transformer dtype  BF16
-Codec dtype        FP16
-Attention          FlashAttention 2 KV-cache
-CUDA graphs        Enabled
-Memory profile     Speed
-Batch size         1
+Qwen3-TTS-12Hz-1.7B-Base-W8A8-ConvRot/
+├── model.safetensors
+├── config.json
+├── generation_config.json
+├── tokenizer assets
+├── processor assets
+├── quantization_manifest.json
+└── speech_tokenizer/
 ```
 
-## Current scope
+Sharded safetensors checkpoints remain supported for systems that need lower
+CPU memory use during conversion.
 
-| Capability | Status |
-|---|---|
-| Qwen3-TTS 1.7B VoiceDesign | Supported |
-| W8A8 ConvRot checkpoints | Supported |
-| Comfy Kitchen CUDA execution | Required |
-| FlashAttention 2 graph decode | Supported with feature detection |
-| SDPA graph decode | Supported fallback |
-| Batch-1 generation | Optimized path |
-| Other Qwen3-TTS 1.7B variants | Planned |
-| Additional quantization formats | Planned and benchmark-gated |
+## Requirements
 
-## Highlights
+- A modern ComfyUI installation
+- A CUDA-capable NVIDIA GPU
+- A ComfyUI Python environment with PyTorch and CUDA already working
+- Comfy Kitchen with its CUDA backend
+- `qwen-tts-hf`
+- `faster-qwen3-tts`
+- `safetensors`, `accelerate`, and `huggingface-hub`
+- FlashAttention 2 only when selecting the FlashAttention backend
 
-- Streaming/sharded quantization from a Hugging Face ID, snapshot directory, safetensors file, safetensors index, or sharded safetensors directory
-- Shape-aware `Qwen3TTSVoiceDesignAdapter`
-- Safetensors-native format and architecture metadata
-- Packed Comfy Kitchen INT8 linear modules
-- CPU selective-gather text embedding
-- Static Talker KV cache with SDPA and FlashAttention 2 CUDA graph paths
-- Fused FlashAttention KV-cache updates for fixed-shape Talker and Predictor decode
-- Persistent codec history and Predictor input buffers
-- Generation-wide Comfy Kitchen backend dispatch
-- Explicit ComfyUI VRAM-pressure integration without ComfyUI core changes
-- Loader, Voice Design, Runtime Settings, Diagnostics, one-shot Benchmark, and Unload nodes
-- Deterministic seed and generation telemetry
-
-Read [docs/DESIGN.md](docs/DESIGN.md) for the quantization rationale, execution design, and
-compatibility boundary.
+The project does not pin or replace PyTorch, torchvision, torchaudio, CUDA, or
+Transformers. Installation uses the environment that already runs ComfyUI.
 
 ## Installation
 
-Use the Python executable that launches your ComfyUI installation. The commands below assume the
-repository is installed directly under `custom_nodes`.
+Clone the repository under ComfyUI's `custom_nodes` directory:
 
-```bash
-cd /path/to/ComfyUI/custom_nodes
-git clone https://github.com/NidAll/ComfyUI-Qwen3-TTS-Quant.git
-cd ComfyUI-Qwen3-TTS-Quant
-
-/path/to/ComfyUI/venv/bin/python -m pip install \
-  --upgrade-strategy only-if-needed -r requirements.txt
-
-/path/to/ComfyUI/venv/bin/python -m pip install --no-deps -e .
+```text
+ComfyUI/
+└── custom_nodes/
+    └── ComfyUI-Qwen3-TTS-Quant/
 ```
 
-To update an existing installation:
+Then install the package using the Python executable associated with ComfyUI:
 
-```bash
-cd /path/to/ComfyUI/custom_nodes/ComfyUI-Qwen3-TTS-Quant
-git pull --ff-only
-/path/to/ComfyUI/venv/bin/python -m pip install --no-deps -e .
+```console
+<COMFYUI_PYTHON> -m pip install --upgrade-strategy only-if-needed -r requirements.txt
+<COMFYUI_PYTHON> -m pip install --no-deps -e .
 ```
 
-The requirements intentionally do not pin Torch, torchvision, torchaudio, CUDA, or Transformers. Confirm that pip did not propose replacing Torch before accepting any environment change. `faster-qwen3-tts 0.4.x` requires Transformers 5.15.1 or newer.
+Replace `<COMFYUI_PYTHON>` with the correct executable for your installation.
+Examples include a virtual-environment Python executable, a portable embedded
+Python executable, or `python` after activating the environment.
 
-Comfy Kitchen must already be importable from the same Python environment:
+Verify the required runtime:
 
-```bash
-/path/to/venv/bin/python -c "import torch, comfy_kitchen; print(torch.__version__, torch.version.cuda); print(comfy_kitchen.list_backends())"
+```console
+<COMFYUI_PYTHON> -c "import torch, comfy_kitchen; print(torch.__version__, torch.version.cuda); print(comfy_kitchen.list_backends())"
 ```
 
-Restart ComfyUI after installation. No ComfyUI core file is edited.
+Restart ComfyUI after installation.
 
-## Quantize the model
+## Quantization
 
-Run conversion inside the ComfyUI environment so it uses the installed Comfy Kitchen CUDA backend:
+Run the quantizer from the repository directory with the same Python environment
+used by ComfyUI.
 
-```bash
-cd /path/to/ComfyUI/custom_nodes/ComfyUI-Qwen3-TTS-Quant
-/path/to/venv/bin/python -m qwen3_tts_quantizer \
-  --model Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign \
-  --output /path/to/ComfyUI/models/qwen3_tts_quant/Qwen3-TTS-12Hz-1.7B-VoiceDesign-W8A8-ConvRot \
-  --format auto \
-  --device cuda \
-  --kernel-backend cuda \
-  --calibration auto \
-  --max-shard-mib 768 \
-  --verbose
+### VoiceDesign
+
+```console
+<COMFYUI_PYTHON> -m qwen3_tts_quantizer --model Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign --output <MODEL_DIRECTORY>/Qwen3-TTS-12Hz-1.7B-VoiceDesign-W8A8-ConvRot --format w8a8-convrot --device cuda --kernel-backend cuda --calibration auto --max-shard-mib 8192 --verbose
 ```
 
-`--format auto` currently resolves to the one selected target, `w8a8-convrot`. It does not claim that an unmeasured format matrix was run. This format uses dynamic activation quantization, so no calibration corpus is required.
+### Base voice-cloning model
 
-For a local source:
-
-```bash
-/path/to/venv/bin/python -m qwen3_tts_quantizer \
-  --model /models/Qwen3-TTS-VoiceDesign \
-  --output /path/to/ComfyUI/models/qwen3_tts_quant/VoiceDesign-W8A8-ConvRot \
-  --format w8a8-convrot --device cuda --kernel-backend cuda
+```console
+<COMFYUI_PYTHON> -m qwen3_tts_quantizer --model Qwen/Qwen3-TTS-12Hz-1.7B-Base --output <MODEL_DIRECTORY>/Qwen3-TTS-12Hz-1.7B-Base-W8A8-ConvRot --format w8a8-convrot --device cuda --kernel-backend cuda --calibration auto --max-shard-mib 8192 --verbose
 ```
 
-For one safetensors file or an index whose config assets live elsewhere, add `--config-dir /path/to/model-config-directory`.
+### CustomVoice
 
-Conversion reads one source tensor at a time. It does not load the original model into VRAM as a complete dense model. Essential recognition metadata is embedded into every output safetensors shard; `quantization_manifest.json` is diagnostic.
+```console
+<COMFYUI_PYTHON> -m qwen3_tts_quantizer --model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice --output <MODEL_DIRECTORY>/Qwen3-TTS-12Hz-1.7B-CustomVoice-W8A8-ConvRot --format w8a8-convrot --device cuda --kernel-backend cuda --calibration auto --max-shard-mib 8192 --verbose
+```
 
-The writer clones serialized tensors before saving. This is required because the repeated Comfy quantization marker intentionally has identical contents, while safetensors rejects aliased storage.
+`<MODEL_DIRECTORY>` should normally point to:
 
-## ComfyUI workflow
+```text
+ComfyUI/models/qwen3_tts_quant
+```
 
-1. Copy or quantize the output directory under `ComfyUI/models/qwen3_tts_quant/`.
-2. Restart ComfyUI so the loader list refreshes.
-3. Add `Qwen3 TTS Runtime Settings` and retain the defaults.
-4. Connect it to `Qwen3 TTS Quantized Model Loader`.
-5. Select the converted model directory.
-6. Connect `Qwen3 TTS Voice Design`, then connect its `AUDIO` output to ComfyUI’s `SaveAudio` node.
+The `8192 MiB` limit produces one physical shard for these packed 1.7B
+checkpoints. The current writer names it
+`model-00001-of-00001.safetensors` and creates a single-shard index.
 
-An importable starting workflow is in [examples/voice_design_workflow.json](examples/voice_design_workflow.json).
+For the recommended clean layout, rename:
 
-## Recommended starting settings
+```text
+model-00001-of-00001.safetensors  ->  model.safetensors
+```
 
-| Setting | Value | Reason |
+Then remove `model.safetensors.index.json`.
+
+On POSIX-compatible shells:
+
+```console
+mv <OUTPUT_DIRECTORY>/model-00001-of-00001.safetensors <OUTPUT_DIRECTORY>/model.safetensors
+rm <OUTPUT_DIRECTORY>/model.safetensors.index.json
+```
+
+On PowerShell:
+
+```powershell
+Move-Item "<OUTPUT_DIRECTORY>/model-00001-of-00001.safetensors" "<OUTPUT_DIRECTORY>/model.safetensors"
+Remove-Item "<OUTPUT_DIRECTORY>/model.safetensors.index.json"
+```
+
+Single-file output retains converted tensors in CPU memory until serialization.
+Use a smaller value such as `--max-shard-mib 768` when conversion memory is
+limited. Keep every shard and the generated index when using that mode.
+
+### Local sources
+
+`--model` also accepts:
+
+- A local Hugging Face snapshot
+- A directory containing safetensors shards
+- A `model.safetensors.index.json` file
+- One safetensors file
+
+For a standalone safetensors file whose configuration lives elsewhere, add:
+
+```console
+--config-dir <CONFIG_DIRECTORY>
+```
+
+Conversion processes source tensors incrementally. The original dense model is
+never loaded completely into GPU memory.
+
+## Importable workflows
+
+The `examples` directory contains:
+
+| Workflow | File |
+|---|---|
+| Voice design | [voice_design_workflow.json](examples/voice_design_workflow.json) |
+| Voice cloning | [voice_clone_workflow.json](examples/voice_clone_workflow.json) |
+| CustomVoice | [custom_voice_workflow.json](examples/custom_voice_workflow.json) |
+
+Import the appropriate JSON into ComfyUI, select the matching checkpoint in the
+loader, and connect the output to `SaveAudio` or another compatible audio node.
+
+The model and generation node must match:
+
+- VoiceDesign checkpoint with `Qwen3 TTS Voice Design`
+- Base checkpoint with `Qwen3 TTS Voice Clone`
+- CustomVoice checkpoint with `Qwen3 TTS Custom Voice`
+
+Mismatched combinations fail with an explicit compatibility error.
+
+## Nodes
+
+### Qwen3 TTS Runtime Settings
+
+Configures:
+
+- Transformer compute dtype
+- Speech codec dtype
+- Attention backend
+- Comfy Kitchen kernel backend
+- CUDA graph mode
+- Maximum sequence length
+- VRAM safety reserve
+
+### Qwen3 TTS Quantized Model Loader
+
+Discovers checkpoints under `models/qwen3_tts_quant`, reads their embedded
+metadata, instantiates the correct architecture, and preserves packed weights.
+Loaded models are reused across workflow executions.
+
+### Qwen3 TTS Voice Design
+
+Generates speech from:
+
+- Target text
+- Voice description
+- Language
+- Sampling controls
+
+### Qwen3 TTS Voice Clone
+
+Uses a ComfyUI `AUDIO` reference and provides two modes:
+
+| Mode | Reference transcript | Behavior |
 |---|---|---|
-| Compute dtype | `bfloat16` | Stable transformer interface on supported CUDA devices |
-| Codec dtype | `float16` | Lower decoder VRAM and strong CUDA throughput |
-| Attention | `flash_attention_2` | Fastest path in the current validated W8A8 ConvRot runs |
-| Kernel backend | `cuda` | Selects Comfy Kitchen compiled CUDA kernels explicitly |
-| CUDA graphs | `auto` | Uses graphs when capture succeeds and records any fallback |
-| Memory profile | `speed` | Keeps Talker, Predictor, KV, and codec GPU resident |
-| Maximum sequence | `2048` | About 224 MiB for the 28-layer Talker KV cache |
-| Safety headroom | `320 MiB` | Avoids operating at the physical VRAM edge |
+| `icl` | Required | Uses speaker features and reference acoustic context for stronger similarity |
+| `speaker_embedding_only` | Optional | Uses only the speaker representation and can simplify cross-language cloning |
 
-`cuda_graphs=on` is strict and fails if capture is incompatible. `auto` records `cuda_graph_error` in the Diagnostics node before using the upstream path. The runtime never reports graphs as active after a failed capture.
+For `icl`, enter an accurate transcript of the reference recording. A short,
+clean sample with one speaker gives the strongest foundation.
 
-For the compatibility path, use `attention_backend=sdpa`. For the fastest validated path, use
-`flash_attention_2` with `cuda_graphs=auto` first. After one successful generation,
-the Diagnostics node must show both:
+The latest extracted reference prompt is cached. Reusing the same audio,
+transcript, and cloning mode avoids repeated prompt extraction. The cache is
+bounded and cleared when the model is unloaded.
+
+### Qwen3 TTS Custom Voice
+
+Supports the official named speakers:
+
+| Speaker | Native profile |
+|---|---|
+| Vivian | Chinese female |
+| Serena | Chinese female |
+| Uncle_Fu | Chinese male |
+| Dylan | Beijing dialect male |
+| Eric | Sichuan dialect male |
+| Ryan | English male |
+| Aiden | English male |
+| Ono_Anna | Japanese female |
+| Sohee | Korean female |
+
+Each voice can generate any language supported by the checkpoint. Native
+language pairings generally provide the most natural result.
+
+### Qwen3 TTS Diagnostics
+
+Reports the versions and execution paths actually active at runtime, including:
+
+- PyTorch and CUDA runtime
+- GPU compute capability
+- Comfy Kitchen version and selected backend
+- Attention implementation
+- CUDA graph state
+- Quantization format
+- Model variant
+- Memory plan
+
+### Qwen3 TTS One-Shot Benchmark
+
+Runs one deterministic VoiceDesign generation and returns structured timing and
+memory telemetry. It provides a reproducible local measurement rather than a
+theoretical throughput estimate.
+
+### Qwen3 TTS Unload Model
+
+Invalidates the model handle and releases model references, graph pools, prompt
+caches, and CUDA cache resources.
+
+## Recommended runtime settings
+
+| Setting | Recommended start |
+|---|---|
+| Transformer dtype | `bfloat16` |
+| Codec dtype | `float16` |
+| Attention | `flash_attention_2` when compatible, otherwise `sdpa` |
+| Kernel backend | `cuda` |
+| CUDA graphs | `auto` |
+| Memory profile | `speed` |
+| Maximum sequence length | `2048` |
+
+`cuda_graphs=auto` attempts graph initialization and records the reason when a
+fallback occurs. `cuda_graphs=on` is strict. Use strict mode after confirming
+that capture succeeds with the installed versions.
+
+After a successful FlashAttention graph capture, Diagnostics reports:
 
 ```json
 {
@@ -175,101 +306,104 @@ the Diagnostics node must show both:
 }
 ```
 
-Then `cuda_graphs=on` can be used as a strict setting. Dynamic prefill continues to use the
-Transformers FlashAttention 2 integration. Fixed-shape Talker and Code Predictor decode use
-`flash_attn_with_kvcache`, with the cache update fused into attention and the sequence length kept
-in a CUDA tensor for graph replay. The adapter is installed only on this model instance and does
-not alter Transformers or ComfyUI globally.
+Dynamic prompt prefill uses the selected Transformers attention integration.
+Fixed-shape Talker and Code Predictor decode can use captured graphs and
+`flash_attn_with_kvcache`.
 
-## How the v0.1.6 FlashAttention graph path works
+## Quantization policy
 
-The earlier graph integration supplied a fixed 4D additive StaticCache mask to Transformers'
-generic FlashAttention adapter. That adapter interpreted the tensor as a padding mask and entered
-the variable-length unpadding path, which could produce an out-of-bounds CUDA index during graph
-warmup.
+The architecture adapter identifies recurrent attention and MLP linears by
+module type, path, tensor shape, and configuration metadata. It applies W8A8
+ConvRot to compatible Talker and Code Predictor projections.
 
-Version 0.1.6 separates the two attention workloads:
+Quality-sensitive components remain in higher precision:
 
-- Variable-length prompt prefill stays on the normal Transformers FlashAttention 2 implementation.
-- Fixed-shape Talker and Code Predictor graph decode call `flash_attn_with_kvcache` directly.
-- New K/V values are written into the preallocated cache inside the attention kernel.
-- Cache length remains an INT32 CUDA tensor, allowing it to advance during graph replay.
-- RoPE remains inside Qwen's model implementation, preserving its multimodal position semantics.
-- Attention wrappers belong only to the loaded model instance. ComfyUI and Transformers remain untouched globally.
+- Text and codec embeddings
+- RMSNorm parameters
+- Output and sampling heads
+- Text projections
+- Speaker-processing components
+- Speech-tokenizer reconstruction layers
 
-The graph runtime also removes the Talker's per-position mask table and per-frame mask copy. This
-reduces setup memory and recurring launch work.
+Each safetensors output embeds:
 
-You can validate the installed FlashAttention kernel and the exact transposed StaticCache layout
-without loading the TTS checkpoint:
+- Quantization format and version
+- Architecture and model variant
+- Original model and source revision
+- Tensor layout and group size
+- ConvRot parameters
+- Quantized-layer map
+- Exclusion policy
+- Compute dtype and recommended backend
+- Source fingerprint
 
-```bash
-/path/to/venv/bin/python benchmarks/flash_kvcache_smoke.py --dtype bfloat16
+The loader validates this metadata before allocating the runtime.
+
+## Attention and CUDA graphs
+
+The graph runtime uses separate paths for variable-length prompt prefill and
+fixed-shape autoregressive decode.
+
+During FlashAttention graph decode, an instance-local adapter calls
+`flash_attn_with_kvcache` for the Talker and Code Predictor. Cache updates occur
+inside the attention operation, and sequence length stays in a CUDA tensor for
+graph replay.
+
+The adapter applies only to the loaded Qwen3-TTS model instance. It does not
+modify Transformers or ComfyUI globally.
+
+Use `sdpa` when FlashAttention 2 is unavailable or incompatible with the current
+environment.
+
+## Telemetry
+
+Generation nodes return an audio value and a JSON telemetry string containing:
+
+- Total generation time
+- Generated audio duration
+- Real-time factor
+- Audio-seconds-per-generation-second
+- Prefill time
+- Decode time
+- Codec time
+- Acoustic frames per second
+- Peak and steady CUDA memory
+- Active attention and kernel backends
+- CUDA graph status
+- Seed
+
+Real-time factor is calculated as:
+
+```text
+RTF = generation_seconds / audio_seconds
 ```
 
-Both query-length cases should report `"passed": true`. Query length 1 represents Talker decode;
-query length 2 represents Predictor prefill inside its captured 15-step loop.
-
-The Predictor graph captures its sampling parameters on first generation. Reload the model to change temperature, top-k, or top-p after capture, or select graphs `off`.
-
-## Telemetry and one-shot benchmark
-
-The Voice Design node returns JSON alongside audio:
-
-```json
-{
-  "audio_seconds": 8.25,
-  "total_seconds": 5.10,
-  "rtf": 0.618,
-  "realtime_multiplier": 1.618,
-  "peak_vram_mib": 0.0,
-  "steady_vram_mib": 0.0,
-  "graph_active": true,
-  "acoustic_steps": 99,
-  "prefill_seconds": 0.12,
-  "decode_seconds": 3.70,
-  "codec_seconds": 0.84,
-  "acoustic_frames_per_second": 26.76
-}
-```
-
-The zero values in this schema example are populated with measurements at runtime. Use `Qwen3 TTS One-Shot Benchmark` for one warmed generation. `RTF = generation seconds / audio seconds`; lower is faster. The reciprocal is reported as `realtime_multiplier`.
-
-To compare only the two practical graph paths with the same prompt and seed:
-
-```bash
-/path/to/venv/bin/python benchmarks/one_shot.py \
-  --checkpoint /path/to/VoiceDesign-W8A8-ConvRot \
-  --attention sdpa --cuda-graphs on --max-new-tokens 512
-
-/path/to/venv/bin/python benchmarks/one_shot.py \
-  --checkpoint /path/to/VoiceDesign-W8A8-ConvRot \
-  --attention flash_attention_2 --cuda-graphs on --max-new-tokens 512
-```
-
-Compare `rtf`, `acoustic_frames_per_second`, `prefill_seconds`, `codec_seconds`, and peak VRAM.
-This targeted comparison isolates the two practical attention paths without running a complete
-quantization matrix. Runtime performance still decides the result because single-query attention
-can represent a modest share of total W8A8 autoregressive time.
-
-## Memory behavior
-
-Before load, the compatibility adapter calls ComfyUI’s public `free_memory` function to release competing models. It does not modify core files or install global monkey patches. The autoregressive transformer stays resident for the lifetime of the loader output. The Unload node releases model references, graph pools, and CUDA cache explicitly.
-
-This first speed release intentionally implements only the `speed` profile. Codec scheduling and partial residency remain deferred because moving the codec while retaining graph pools can increase peak memory or introduce synchronization, which conflicts with the requested fastest RTF.
+Values below `1.0` represent faster-than-realtime generation.
 
 ## Troubleshooting
 
-**Prompt validation reports `top_p` > 1, `temperature` > 2, or `max_new_tokens` < 2:**
-This is a stale ComfyUI widget-order issue, not a model-download or CUDA error. ComfyUI stores
-custom-node widget values positionally in a workflow. If a workflow was saved with an earlier
-revision of this node, values can be presented under the wrong names (for example, repetition
-penalty `1.05` being read as `top_p`, or top-k `50` being read as `temperature`). Stop ComfyUI,
-install the current pack, restart it, then delete and re-add the **Qwen3 TTS Voice Design** node
-before reconnecting the model. Do not reuse the old node instance. Use these valid starter values:
+### Checkpoint is missing from the loader
+
+Place the complete checkpoint directory under:
+
+```text
+ComfyUI/models/qwen3_tts_quant/
+```
+
+A single-file checkpoint needs `model.safetensors` and its configuration,
+processor, tokenizer, and `speech_tokenizer` assets. A sharded checkpoint needs
+every shard plus `model.safetensors.index.json`. Restart ComfyUI after adding a
+checkpoint.
+
+### Prompt values appear under the wrong controls
+
+ComfyUI stores widget values positionally. Delete stale generation nodes and
+import the current workflow again. The supplied workflows include the seed
+control widget required to keep the following values aligned:
 
 ```text
 seed                 42
+seed control         fixed
 max_new_tokens       1024
 temperature          0.90
 top_k                50
@@ -277,75 +411,89 @@ top_p                1.00
 repetition_penalty   1.05
 ```
 
-The supplied `examples/voice_design_workflow.json` contains this current ordering. Save the
-workflow again after recreating the node. This does not require changing any ComfyUI core file.
+### FlashAttention is unavailable
 
-**`sox: command not found`:** Install the SoX system utility with your operating system's package manager, then verify it is on `PATH`:
+Select `sdpa`. FlashAttention availability depends on the installed PyTorch,
+CUDA, GPU architecture, and FlashAttention build.
 
-```bash
-command -v sox
-```
+### CUDA graph capture fails
 
-The VoiceDesign path does not use reference-audio extraction, so SoX is not on the critical
-generation path. Installing it removes the warning and keeps future voice-clone/audio-preprocess
-paths functional.
+Use `cuda_graphs=auto` to retain an explicit fallback or `off` to disable
+capture. If a CUDA device-side assertion has occurred, restart ComfyUI before
+running another CUDA workload.
 
-**`mat1 and mat2 must have the same dtype` or CUDA graph warmup reports a BF16/Float mismatch:**
-Install the current pack revision and restart ComfyUI. The loader now normalizes all floating
-Talker parameters and buffers to the selected compute dtype while preserving INT8 packed weights
-and FP32 quantization scales. This covers the unquantized `text_projection` layers and the static
-KV-cache capture path.
+### Sampling settings changed after graph capture
 
-**Sample-rate fallback warning:** Qwen3-TTS `12Hz` is the codec frame rate; generated waveforms
-are normally 24 kHz. The current loader reads `output_sample_rate` from the speech-tokenizer
-configuration before constructing the fast wrapper.
+Predictor sampling parameters are captured on the first graph generation.
+Reload the model to capture different temperature, top-k, or top-p values, or
+turn CUDA graphs off.
 
-**No checkpoint appears:** Place the entire converted directory, including `config.json`, shards, index, processor assets, and `speech_tokenizer/`, under `models/qwen3_tts_quant/`, then restart ComfyUI.
+### Dtype mismatch
 
-**Comfy Kitchen CUDA backend unavailable:** Run the import check above. The Diagnostics node reports the installed package version, GPU capability, and backend registry. This runtime refuses to label an eager or Triton fallback as CUDA.
+Install the latest node-pack revision and restart ComfyUI. The loader normalizes
+floating Talker tensors to the selected compute dtype while retaining packed
+INT8 weights and FP32 quantization scales.
 
-**Out of memory before generation:** Close other GPU applications, unload diffusion models, reduce maximum sequence length to 1024, or increase available VRAM. A 1024-token Talker cache is about 112 MiB. The runtime rejects an unsafe estimated plan before generation.
+### SoX warning
 
-**CUDA graph capture fails:** Keep `cuda_graphs=auto` for an explicit recorded fallback, or set it to `off`. Use `on` only after one successful auto capture.
+VoiceDesign and CustomVoice do not require reference-audio extraction. Voice
+Clone passes the ComfyUI waveform and sample rate directly to the upstream
+prompt builder. SoX remains useful for wider audio-format support but is not a
+package-level requirement.
 
-**FlashAttention 2 with CUDA graphs:** Version 0.1.6 no longer feeds the graph's 4D additive mask
-to FlashAttention's variable-length unpadding code. Static-cache decode instead uses
-`flash_attn_with_kvcache`. This path currently requires batch size 1, a padding-free prompt,
-FP16/BF16 compute, and a compatible FlashAttention 2 build. If the function is absent, `auto`
-uses dynamic FA2 and records the reason; `on` fails before capture. If a previous version caused a
-CUDA device-side assertion, fully restart ComfyUI before testing this version because that CUDA
-context cannot be recovered safely inside the same process.
+### Out of memory
 
-**FlashAttention unavailable:** Use `sdpa`. Selecting `flash_attention_2` delegates to Transformers and fails visibly when FA2 is unavailable or incompatible.
-
-**Transformers reports that FlashAttention was selected without a dtype:** The loader constructs
-the architecture before materializing checkpoint tensors, so this warning can appear during model
-creation. The runtime subsequently normalizes floating Talker tensors to the selected compute dtype.
-Confirm the final value through `compute_dtype` in the Diagnostics node.
-
-**Transformers reports a `qwen3_tts` model type mismatch with an empty target type:** This message
-comes from speech-tokenizer configuration loading in the current upstream stack. Successful loading
-of all tokenizer weights followed by normal waveform generation confirms the compatible path.
-
-**Model was unloaded:** Execute the loader again. The explicit Unload node invalidates that handle by design.
+Close competing GPU workloads, lower the maximum sequence length, and unload
+other ComfyUI models. The memory planner checks available device memory before
+generation and rejects unsafe plans explicitly.
 
 ## Tests
 
-CPU-only policy and metadata tests:
+Run the CPU-compatible suite:
 
-```bash
-PYTHONPATH=. python -m unittest discover -s tests -v
+```console
+<COMFYUI_PYTHON> -m unittest discover -s tests -v
 ```
 
-Policy, metadata, architecture, and feature-detection tests run without CUDA. The INT8 kernel test
-requires Comfy Kitchen CUDA. FlashAttention KV-cache graph capture and full VoiceDesign generation
-have also been validated through repeated local runs; the performance table above reports those
-measurements directly.
+CUDA kernel validation requires Comfy Kitchen and a compatible CUDA environment.
+The FlashAttention KV-cache smoke test is available separately:
 
-## Updating safely
+```console
+<COMFYUI_PYTHON> benchmarks/flash_kvcache_smoke.py --dtype bfloat16
+```
 
-Update ComfyUI and Comfy Kitchen normally, without copying files from this project into `ComfyUI/comfy/`. After an update, run the backend import check and one short Diagnostics/Benchmark workflow. The custom checkpoint metadata contains its format version and source fingerprint; incompatible formats fail explicitly.
+## Updating
+
+Update the repository with Git, reinstall the editable package if required, and
+restart ComfyUI:
+
+```console
+git pull --ff-only
+<COMFYUI_PYTHON> -m pip install --no-deps -e .
+```
+
+No project file belongs inside `ComfyUI/comfy`. Keep the node pack isolated
+under `custom_nodes` so ComfyUI updates remain safe.
+
+## Project structure
+
+```text
+ComfyUI-Qwen3-TTS-Quant/
+├── nodes/
+├── q3tts_quant/
+│   ├── adapters/
+│   ├── comfy_integration/
+│   ├── quantization/
+│   └── runtime/
+├── qwen3_tts_quantizer/
+├── benchmarks/
+├── examples/
+├── tests/
+└── docs/
+```
 
 ## License
 
-Apache-2.0. Upstream Qwen3-TTS, ComfyUI, Comfy Kitchen, and faster-qwen3-tts retain their own licenses. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Apache-2.0. Qwen3-TTS, ComfyUI, Comfy Kitchen, FlashAttention, and
+faster-qwen3-tts retain their respective licenses. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

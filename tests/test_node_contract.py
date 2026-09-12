@@ -9,7 +9,8 @@ class NodeContractTests(unittest.TestCase):
         tree = ast.parse(source.read_text(encoding="utf-8"))
         literals = {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
         expected = {
-            "Qwen3TTSQuantizedLoader", "Qwen3TTSVoiceDesign", "Qwen3TTSRuntimeSettings",
+            "Qwen3TTSQuantizedLoader", "Qwen3TTSVoiceDesign", "Qwen3TTSVoiceClone",
+            "Qwen3TTSCustomVoice", "Qwen3TTSRuntimeSettings",
             "Qwen3TTSDiagnostics", "Qwen3TTSBenchmark", "Qwen3TTSUnload",
         }
         self.assertTrue(expected.issubset(literals))

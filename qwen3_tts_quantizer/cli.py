@@ -11,7 +11,7 @@ from q3tts_quant.quantization.quantizer import quantize_model
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="qwen3-tts-quantize",
-        description="Create a Comfy-compatible W8A8 ConvRot Qwen3-TTS VoiceDesign checkpoint.",
+        description="Create a Comfy-compatible W8A8 ConvRot Qwen3-TTS 1.7B checkpoint.",
     )
     parser.add_argument("--model", required=True, help="Hugging Face ID, snapshot, directory, or safetensors file")
     parser.add_argument("--output", required=True)

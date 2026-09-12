@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Allocation-conscious VoiceDesign loop for the W8A8 ConvRot graph runtime.
+"""Allocation-conscious Qwen3-TTS loop for the W8A8 ConvRot graph runtime.
 
 The control flow follows faster-qwen3-tts' graph API, while keeping codec
 history in a preallocated tensor.  This removes the growing per-step stack and
@@ -205,6 +205,159 @@ def optimized_wrapper_class():
     from faster_qwen3_tts import FasterQwen3TTS
 
     class OptimizedFasterQwen3TTS(FasterQwen3TTS):
+        def _decode_generated_codes(self, model, codec_ids, timing, ref_codes=None):
+            if codec_ids is None:
+                log.warning("generation returned no acoustic tokens")
+                self._last_timing = timing
+                return [np.zeros(1, dtype=np.float32)], self.sample_rate
+
+            codec_started = time.perf_counter()
+            if ref_codes is not None:
+                ref_codes = ref_codes.to(codec_ids.device)
+                codes_for_decode = torch.cat([ref_codes, codec_ids], dim=0)
+            else:
+                codes_for_decode = codec_ids
+            audio_list, sample_rate = model.speech_tokenizer.decode(
+                {"audio_codes": codes_for_decode.unsqueeze(0)}
+            )
+            torch.cuda.synchronize()
+            timing["codec_s"] = time.perf_counter() - codec_started
+            self._last_timing = timing
+
+            ref_len = ref_codes.shape[0] if ref_codes is not None else 0
+            total_len = codes_for_decode.shape[0]
+            audio_arrays = []
+            for audio in audio_list:
+                if hasattr(audio, "cpu"):
+                    audio = audio.flatten().cpu().numpy()
+                else:
+                    audio = audio.flatten() if hasattr(audio, "flatten") else audio
+                if ref_len:
+                    audio = audio[int(ref_len / max(total_len, 1) * len(audio)) :]
+                audio_arrays.append(audio)
+
+            audio_duration = timing["steps"] / 12.0
+            total = timing["prefill_ms"] / 1000 + timing["decode_s"]
+            log.info(
+                "generated %.2fs audio in %.2fs (%.1fms/frame, %.2fx realtime)",
+                audio_duration,
+                total,
+                timing["ms_per_step"],
+                audio_duration / total if total else 0.0,
+            )
+            return audio_arrays, sample_rate
+
+        def _run_graph_decode(self, prepared, **generation):
+            model, talker, config, embeds, mask, trailing, pad = prepared[:7]
+            codec_ids, timing = fast_generate_w8a8(
+                talker=talker,
+                talker_input_embeds=embeds,
+                attention_mask=mask,
+                trailing_text_hiddens=trailing,
+                tts_pad_embed=pad,
+                config=config,
+                predictor_graph=self.predictor_graph,
+                talker_graph=self.talker_graph,
+                **generation,
+            )
+            ref_codes = prepared[7] if len(prepared) > 7 else None
+            return self._decode_generated_codes(model, codec_ids, timing, ref_codes)
+
+        @torch.inference_mode()
+        def generate_voice_clone(
+            self,
+            text: str,
+            language: str,
+            ref_audio=None,
+            ref_text: str = "",
+            max_new_tokens: int = 2048,
+            min_new_tokens: int = 2,
+            temperature: float = 0.9,
+            top_k: int = 50,
+            top_p: float = 1.0,
+            do_sample: bool = True,
+            repetition_penalty: float = 1.05,
+            xvec_only: bool = False,
+            non_streaming_mode=None,
+            append_silence: bool = True,
+            instruct=None,
+            ref_spk=None,
+            ref_rvq=None,
+            ref_spk_emb=None,
+            ref_codes=None,
+            voice_clone_prompt=None,
+        ):
+            if self.model.model.tts_model_type != "base":
+                raise ValueError("Loaded model does not support voice cloning")
+            self.model._validate_languages([language])
+            self._reject_ggml_cached_reference_args(
+                ref_spk=ref_spk,
+                ref_rvq=ref_rvq,
+                ref_spk_emb=ref_spk_emb,
+                ref_codes=ref_codes,
+            )
+            non_streaming_mode = self._resolve_non_streaming_mode(non_streaming_mode, default=False)
+            prepared = self._prepare_generation(
+                text=text,
+                language=language,
+                ref_audio=ref_audio,
+                ref_text=ref_text,
+                xvec_only=xvec_only,
+                non_streaming_mode=non_streaming_mode,
+                append_silence=append_silence,
+                voice_clone_prompt=voice_clone_prompt,
+                instruct=instruct,
+            )
+            return self._run_graph_decode(
+                prepared,
+                max_new_tokens=max_new_tokens,
+                min_new_tokens=min_new_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                do_sample=do_sample,
+                repetition_penalty=repetition_penalty,
+            )
+
+        @torch.inference_mode()
+        def generate_custom_voice(
+            self,
+            text: str,
+            speaker: str,
+            language: str,
+            instruct=None,
+            non_streaming_mode=None,
+            max_new_tokens: int = 2048,
+            min_new_tokens: int = 2,
+            temperature: float = 0.9,
+            top_k: int = 50,
+            top_p: float = 1.0,
+            do_sample: bool = True,
+            repetition_penalty: float = 1.05,
+        ):
+            if self.model.model.tts_model_type != "custom_voice":
+                raise ValueError("Loaded model does not support custom voice generation")
+            self.model._validate_languages([language])
+            self.model._validate_speakers([speaker])
+            non_streaming_mode = self._resolve_non_streaming_mode(non_streaming_mode, default=True)
+            prepared = self._prepare_generation_custom(
+                text=text,
+                language=language,
+                speaker=speaker,
+                instruct=instruct,
+                non_streaming_mode=non_streaming_mode,
+            )
+            return self._run_graph_decode(
+                prepared,
+                max_new_tokens=max_new_tokens,
+                min_new_tokens=min_new_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                do_sample=do_sample,
+                repetition_penalty=repetition_penalty,
+            )
+
         @torch.inference_mode()
         def generate_voice_design(
             self,
@@ -231,15 +384,8 @@ def optimized_wrapper_class():
                 instruct=instruct,
                 non_streaming_mode=non_streaming_mode,
             )
-            codec_ids, timing = fast_generate_w8a8(
-                talker=talker,
-                talker_input_embeds=embeds,
-                attention_mask=mask,
-                trailing_text_hiddens=trailing,
-                tts_pad_embed=pad,
-                config=config,
-                predictor_graph=self.predictor_graph,
-                talker_graph=self.talker_graph,
+            return self._run_graph_decode(
+                (model, talker, config, embeds, mask, trailing, pad),
                 max_new_tokens=max_new_tokens,
                 min_new_tokens=min_new_tokens,
                 temperature=temperature,
@@ -248,33 +394,5 @@ def optimized_wrapper_class():
                 do_sample=do_sample,
                 repetition_penalty=repetition_penalty,
             )
-            if codec_ids is None:
-                log.warning("generation returned no acoustic tokens")
-                self._last_timing = timing
-                return [np.zeros(1, dtype=np.float32)], self.sample_rate
-
-            codec_started = time.perf_counter()
-            audio_list, sample_rate = model.speech_tokenizer.decode(
-                {"audio_codes": codec_ids.unsqueeze(0)}
-            )
-            torch.cuda.synchronize()
-            timing["codec_s"] = time.perf_counter() - codec_started
-            self._last_timing = timing
-            audio_arrays = []
-            for audio in audio_list:
-                if hasattr(audio, "cpu"):
-                    audio_arrays.append(audio.flatten().cpu().numpy())
-                else:
-                    audio_arrays.append(audio.flatten() if hasattr(audio, "flatten") else audio)
-            audio_duration = timing["steps"] / 12.0
-            total = timing["prefill_ms"] / 1000 + timing["decode_s"]
-            log.info(
-                "generated %.2fs audio in %.2fs (%.1fms/frame, %.2fx realtime)",
-                audio_duration,
-                total,
-                timing["ms_per_step"],
-                audio_duration / total if total else 0.0,
-            )
-            return audio_arrays, sample_rate
 
     return OptimizedFasterQwen3TTS

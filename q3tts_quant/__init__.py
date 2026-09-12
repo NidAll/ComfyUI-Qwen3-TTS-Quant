@@ -3,4 +3,4 @@
 from .config import RuntimeSettings
 
 __all__ = ["RuntimeSettings"]
-__version__ = "0.1.6"
+__version__ = "0.2.0"

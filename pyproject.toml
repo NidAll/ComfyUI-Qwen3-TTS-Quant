@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comfyui-qwen3-tts-quant"
-version = "0.1.6"
-description = "W8A8 ConvRot Qwen3-TTS VoiceDesign runtime and ComfyUI nodes"
+version = "0.2.0"
+description = "W8A8 ConvRot Qwen3-TTS runtime and ComfyUI nodes"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}

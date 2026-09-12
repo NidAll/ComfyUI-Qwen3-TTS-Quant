@@ -4,8 +4,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping
 
-FORMAT_VERSION = "1.0"
-QUANTIZER_VERSION = "0.1.0"
+FORMAT_VERSION = "1.1"
+QUANTIZER_VERSION = "0.2.0"
 METADATA_KEY = "q3tts.metadata"
 COMFY_METADATA_KEY = "_quantization_metadata"
 
@@ -27,6 +27,7 @@ class QuantizationMetadata:
     format_version: str = FORMAT_VERSION
     quantizer_version: str = QUANTIZER_VERSION
     architecture: str = "qwen3_tts_voice_design_v1"
+    model_variant: str = "voice_design"
     quantization_format: str = "w8a8_convrot"
     original_model: str = ""
     source_revision: str = ""
@@ -70,6 +71,7 @@ class QuantizationMetadata:
             ),
             "q3tts.quantization_format": self.quantization_format,
             "q3tts.architecture": self.architecture,
+            "q3tts.model_variant": self.model_variant,
             "q3tts.original_model": self.original_model,
             "q3tts.source_revision": self.source_revision,
         }
@@ -83,4 +85,3 @@ def encode_comfy_marker(group_size: int = 256) -> bytes:
         "params": {"convrot": True, "convrot_groupsize": int(group_size)},
     }
     return json.dumps(marker, sort_keys=True, separators=(",", ":")).encode("utf-8")
-

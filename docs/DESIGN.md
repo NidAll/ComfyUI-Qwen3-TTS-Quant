@@ -13,7 +13,7 @@ The target format is heterogeneous **W8A8 ConvRot**:
 | 12 Hz speech tokenizer / decoder | FP16 | GPU resident |
 | Talker KV cache | FP16/BF16 static cache | GPU |
 
-This selection follows the actual batch-1 decode shapes. Current Comfy Kitchen CUDA has a fused M=1 ConvRot INT8 path for K dimensions divisible by 256. The VoiceDesign recurrent linears use K=1024, 2048, 3072, and 6144, which all satisfy that path. Plain W8A8 does not cover the same set through its most specialized M=1 route. W4A16 remains a strong future challenger, but it needs an on-device comparison at these exact shapes before replacing this default.
+This selection follows the actual batch-1 decode shapes. Current Comfy Kitchen CUDA has a fused M=1 ConvRot INT8 path for K dimensions divisible by 256. The shared 1.7B recurrent linears use K=1024, 2048, 3072, and 6144, which all satisfy that path. Plain W8A8 does not cover the same set through its most specialized M=1 route. W4A16 remains a strong future challenger, but it needs an on-device comparison at these exact shapes before replacing this default.
 
 ## Status by optimization
 
@@ -57,12 +57,12 @@ variable-length unpadding path.
 The graph subclasses also eliminate the Talker's table of one full attention mask per possible
 sequence position and the per-frame mask copy. The Predictor passes explicit no-mask entries because
 causality and sliding-window bounds are supplied to the KV-cache kernel. Padded batch input is
-rejected explicitly; the optimized VoiceDesign node targets batch size 1.
+rejected explicitly; the optimized VoiceDesign, Voice Clone, and Custom Voice nodes target batch size 1.
 
 ## W8A8 decode-loop tuning
 
 Comfy Kitchen's backend override is entered once per warmup or generation rather than once per
-quantized Linear call. The VoiceDesign loop keeps a persistent codec output/history buffer, reuses
+quantized Linear call. The shared generation loop keeps a persistent codec output/history buffer, reuses
 the two-token Predictor input, returns the Predictor's captured output buffer without cloning, and
 uses a history view for repetition penalty. Sampling retains the one necessary per-frame EOS host
 check, so generated length and deterministic seed behavior remain unchanged.

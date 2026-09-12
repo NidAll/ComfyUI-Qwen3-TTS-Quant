@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..config import RuntimeSettings
+from ..adapters import ARCHITECTURE_IDS
 from ..errors import CheckpointError, CompatibilityError
 from ..quantization.metadata import METADATA_KEY, QuantizationMetadata
 from .linear import CPUGatherEmbedding, W8A8ConvRotLinear
@@ -157,10 +158,17 @@ def load_quantized_base_model(root: str | Path, settings: RuntimeSettings, devic
     root = Path(root).expanduser().resolve()
     files, raw_metadata, total_size = _checkpoint_files(root)
     metadata = QuantizationMetadata.from_json(raw_metadata[METADATA_KEY])
-    if metadata.architecture != "qwen3_tts_voice_design_v1":
+    if metadata.architecture not in set(ARCHITECTURE_IDS.values()):
         raise CheckpointError(f"unsupported architecture metadata: {metadata.architecture}")
 
     config = Qwen3TTSConfig.from_pretrained(str(root), local_files_only=True)
+    config_variant = str(getattr(config, "tts_model_type", "")).lower()
+    metadata_variant = getattr(metadata, "model_variant", "voice_design")
+    if ARCHITECTURE_IDS.get(config_variant) != metadata.architecture or metadata_variant != config_variant:
+        raise CheckpointError(
+            "checkpoint configuration and quantization metadata disagree: "
+            f"config={config_variant!r}, metadata={metadata_variant!r}"
+        )
     config._attn_implementation = settings.attention_backend
     config.talker_config._attn_implementation = settings.attention_backend
     config.talker_config.code_predictor_config._attn_implementation = settings.attention_backend

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
@@ -172,6 +173,7 @@ class Qwen3TTSEngine:
     _lock: RLock = field(default_factory=RLock, repr=False)
     _unloaded: bool = False
     _graph_sampling_signature: tuple[float, int, float] | None = field(default=None, repr=False)
+    _voice_prompt_cache: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
     def load(cls, checkpoint: str | Path, settings: RuntimeSettings) -> "Qwen3TTSEngine":
@@ -246,6 +248,7 @@ class Qwen3TTSEngine:
             {
                 "checkpoint": str(checkpoint),
                 "quantization": metadata.quantization_format,
+                "model_variant": metadata.model_variant,
                 "compute_dtype": settings.compute_dtype,
                 "codec_dtype": settings.codec_dtype,
                 "cuda_graphs_initialized": active_graphs,
@@ -267,6 +270,7 @@ class Qwen3TTSEngine:
             kernel_backend=settings.kernel_backend,
             attention=settings.attention_backend,
             quantization=metadata.quantization_format,
+            model_variant=metadata.model_variant,
             compute_dtype=settings.compute_dtype,
             codec_dtype=settings.codec_dtype,
             cuda_graphs="pending_capture" if active_graphs else False,
@@ -323,19 +327,17 @@ class Qwen3TTSEngine:
                     else f"transformers_{self.settings.attention_backend}_dynamic"
                 )
 
-    def generate_voice_design(
-        self,
-        *,
-        text: str,
-        instruction: str,
-        language: str,
-        seed: int,
-        max_new_tokens: int,
-        temperature: float,
-        top_k: int,
-        top_p: float,
-        repetition_penalty: float,
-    ) -> tuple[dict[str, Any], GenerationTelemetry]:
+    @property
+    def model_variant(self) -> str:
+        return str(getattr(self.metadata, "model_variant", "voice_design")).lower()
+
+    def _require_variant(self, expected: str, operation: str) -> None:
+        if self.model_variant != expected:
+            raise CompatibilityError(
+                f"{operation} requires a {expected!r} checkpoint, but {self.model_variant!r} is loaded"
+            )
+
+    def _generate_audio(self, *, seed: int, signature: tuple[float, int, float], invoke):
         import torch
 
         if self._unloaded:
@@ -343,7 +345,6 @@ class Qwen3TTSEngine:
         with self._lock, torch.inference_mode():
             torch.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
-            signature = (temperature, top_k, top_p)
             if self.active_cuda_graphs and self._graph_sampling_signature not in {None, signature}:
                 raise CompatibilityError(
                     "predictor CUDA graph sampling parameters changed after capture; reload the model "
@@ -353,17 +354,7 @@ class Qwen3TTSEngine:
             torch.cuda.reset_peak_memory_stats()
             started = time.perf_counter()
             with quant_backend_scope(self.settings.kernel_backend):
-                wavs, sample_rate = self.generator.generate_voice_design(
-                    text=text,
-                    instruct=instruction,
-                    language=language,
-                    max_new_tokens=min(max_new_tokens, self.settings.max_sequence_length),
-                    temperature=temperature,
-                    top_k=top_k,
-                    top_p=top_p,
-                    do_sample=True,
-                    repetition_penalty=repetition_penalty,
-                )
+                wavs, sample_rate = invoke()
             torch.cuda.synchronize()
             elapsed = time.perf_counter() - started
             waveform = torch.as_tensor(wavs[0], dtype=torch.float32, device="cpu").flatten()
@@ -394,6 +385,147 @@ class Qwen3TTSEngine:
             )
             return {"waveform": waveform[None, None, :], "sample_rate": int(sample_rate)}, telemetry
 
+    def generate_voice_design(
+        self,
+        *,
+        text: str,
+        instruction: str,
+        language: str,
+        seed: int,
+        max_new_tokens: int,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        repetition_penalty: float,
+    ) -> tuple[dict[str, Any], GenerationTelemetry]:
+        self._require_variant("voice_design", "Voice Design")
+        limit = min(max_new_tokens, self.settings.max_sequence_length)
+        return self._generate_audio(
+            seed=seed,
+            signature=(temperature, top_k, top_p),
+            invoke=lambda: self.generator.generate_voice_design(
+                text=text,
+                instruct=instruction,
+                language=language,
+                max_new_tokens=limit,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                do_sample=True,
+                repetition_penalty=repetition_penalty,
+            ),
+        )
+
+    def generate_custom_voice(
+        self,
+        *,
+        text: str,
+        speaker: str,
+        instruction: str,
+        language: str,
+        seed: int,
+        max_new_tokens: int,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        repetition_penalty: float,
+    ) -> tuple[dict[str, Any], GenerationTelemetry]:
+        self._require_variant("custom_voice", "CustomVoice")
+        limit = min(max_new_tokens, self.settings.max_sequence_length)
+        return self._generate_audio(
+            seed=seed,
+            signature=(temperature, top_k, top_p),
+            invoke=lambda: self.generator.generate_custom_voice(
+                text=text,
+                speaker=speaker,
+                instruct=instruction or None,
+                language=language,
+                max_new_tokens=limit,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                do_sample=True,
+                repetition_penalty=repetition_penalty,
+            ),
+        )
+
+    def generate_voice_clone(
+        self,
+        *,
+        text: str,
+        reference_audio: dict[str, Any],
+        reference_text: str,
+        language: str,
+        clone_mode: str,
+        append_silence: bool,
+        seed: int,
+        max_new_tokens: int,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        repetition_penalty: float,
+    ) -> tuple[dict[str, Any], GenerationTelemetry]:
+        import torch
+
+        self._require_variant("base", "Voice Clone")
+        if clone_mode not in {"icl", "speaker_embedding_only"}:
+            raise ValueError("clone_mode must be icl or speaker_embedding_only")
+        if clone_mode == "icl" and not reference_text.strip():
+            raise ValueError("reference_text is required when clone_mode is icl")
+        if not isinstance(reference_audio, dict) or "waveform" not in reference_audio:
+            raise ValueError("reference_audio must be a ComfyUI AUDIO value")
+
+        waveform = reference_audio["waveform"].detach().float().cpu()
+        if waveform.ndim == 3:
+            waveform = waveform[0]
+        if waveform.ndim == 2:
+            waveform = waveform.mean(dim=0)
+        if waveform.ndim != 1 or waveform.numel() == 0:
+            raise ValueError("reference_audio contains no usable waveform")
+        sample_rate = int(reference_audio.get("sample_rate", 0))
+        if sample_rate <= 0:
+            raise ValueError("reference_audio has an invalid sample rate")
+
+        digest = hashlib.blake2b(waveform.numpy().tobytes(), digest_size=16).hexdigest()
+        cache_key = f"{digest}:{sample_rate}:{clone_mode}:{append_silence}:{reference_text}"
+
+        def invoke_clone():
+            prompt_items = self._voice_prompt_cache.get(cache_key)
+            if prompt_items is None:
+                prompt_waveform = waveform
+                if clone_mode == "icl" and append_silence:
+                    prompt_waveform = torch.cat(
+                        [waveform, torch.zeros(round(sample_rate * 0.5), dtype=waveform.dtype)]
+                    )
+                prompt_items = self.base_model.create_voice_clone_prompt(
+                    ref_audio=(prompt_waveform.numpy(), sample_rate),
+                    ref_text=reference_text if clone_mode == "icl" else "",
+                    x_vector_only_mode=clone_mode == "speaker_embedding_only",
+                )
+                # Reference features may contain device tensors. Keep only the
+                # latest prompt to bound persistent memory while accelerating
+                # repeated generations from the same reference.
+                self._voice_prompt_cache.clear()
+                self._voice_prompt_cache[cache_key] = prompt_items
+            return self.generator.generate_voice_clone(
+                text=text,
+                language=language,
+                ref_text=reference_text,
+                voice_clone_prompt=prompt_items,
+                max_new_tokens=min(max_new_tokens, self.settings.max_sequence_length),
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                do_sample=True,
+                repetition_penalty=repetition_penalty,
+            )
+
+        return self._generate_audio(
+            seed=seed,
+            signature=(temperature, top_k, top_p),
+            invoke=invoke_clone,
+        )
+
     def unload(self) -> None:
         if self._unloaded:
             return
@@ -402,6 +534,7 @@ class Qwen3TTSEngine:
         with self._lock:
             self.generator = None
             self.base_model = None
+            self._voice_prompt_cache.clear()
             self._unloaded = True
             gc.collect()
             if torch.cuda.is_available():

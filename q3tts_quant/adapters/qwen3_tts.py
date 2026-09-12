@@ -5,10 +5,19 @@ from typing import Any, Iterable, Mapping
 from .base import ArchitectureAdapter, LayerDecision
 
 
-class Qwen3TTSVoiceDesignAdapter(ArchitectureAdapter):
-    """Shape-aware policy for the 1.7B Qwen3-TTS VoiceDesign family."""
+SUPPORTED_VARIANTS = ("base", "custom_voice", "voice_design")
+ARCHITECTURE_IDS = {
+    "base": "qwen3_tts_base_v1",
+    "custom_voice": "qwen3_tts_custom_voice_v1",
+    "voice_design": "qwen3_tts_voice_design_v1",
+}
 
-    adapter_id = "qwen3_tts_voice_design_v1"
+
+class Qwen3TTS17BAdapter(ArchitectureAdapter):
+    """Shape-aware policy shared by the Qwen3-TTS 12 Hz 1.7B family."""
+
+    variant: str
+    adapter_id: str
     _CORE_PREFIXES = (
         "talker.model.layers.",
         "talker.code_predictor.model.layers.",
@@ -22,9 +31,24 @@ class Qwen3TTSVoiceDesignAdapter(ArchitectureAdapter):
         ".mlp.up_proj.weight",
         ".mlp.down_proj.weight",
     )
-    _BRIDGE_SUFFIXES = (
-        "talker.code_predictor.small_to_mtp_projection.weight",
-    )
+    _BRIDGE_SUFFIXES = ("talker.code_predictor.small_to_mtp_projection.weight",)
+
+    def __init__(self, variant: str):
+        normalized = str(variant).lower()
+        if normalized not in SUPPORTED_VARIANTS:
+            raise ValueError(f"unsupported Qwen3-TTS variant: {variant}")
+        self.variant = normalized
+        self.adapter_id = ARCHITECTURE_IDS[normalized]
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> "Qwen3TTS17BAdapter":
+        variant = str(config.get("tts_model_type", "")).lower()
+        adapter = cls(variant)
+        if not adapter.detect(config):
+            raise ValueError(
+                "checkpoint is not a supported Qwen3-TTS 12 Hz 1.7B Base, CustomVoice, or VoiceDesign model"
+            )
+        return adapter
 
     def detect(self, config: Mapping[str, Any]) -> bool:
         model_type = str(config.get("model_type", "")).lower()
@@ -32,13 +56,15 @@ class Qwen3TTSVoiceDesignAdapter(ArchitectureAdapter):
         talker = config.get("talker_config", {}) or {}
         return (
             model_type == "qwen3_tts"
-            and tts_type == "voice_design"
+            and tts_type == self.variant
+            and str(config.get("tts_model_size", "")).lower() == "1b7"
             and int(talker.get("num_code_groups", 0)) == 16
+            and int(talker.get("hidden_size", 0)) == 2048
         )
 
     def validate_checkpoint(self, config: Mapping[str, Any], tensor_names: Iterable[str]) -> None:
         if not self.detect(config):
-            raise ValueError("checkpoint is not a Qwen3-TTS 12 Hz VoiceDesign model")
+            raise ValueError(f"checkpoint is not a Qwen3-TTS 12 Hz 1.7B {self.variant} model")
         names = set(tensor_names)
         required = {
             "talker.model.text_embedding.weight",
@@ -114,3 +140,17 @@ class Qwen3TTSVoiceDesignAdapter(ArchitectureAdapter):
             "speech_tokenizer": "FP16 scheduled codec",
         }
 
+
+class Qwen3TTSBaseAdapter(Qwen3TTS17BAdapter):
+    def __init__(self):
+        super().__init__("base")
+
+
+class Qwen3TTSCustomVoiceAdapter(Qwen3TTS17BAdapter):
+    def __init__(self):
+        super().__init__("custom_voice")
+
+
+class Qwen3TTSVoiceDesignAdapter(Qwen3TTS17BAdapter):
+    def __init__(self):
+        super().__init__("voice_design")
