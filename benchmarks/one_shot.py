@@ -15,9 +15,19 @@ def main() -> int:
     parser.add_argument("--language", default="English")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument(
+        "--attention",
+        choices=["sdpa", "flash_attention_2", "eager"],
+        default="sdpa",
+    )
+    parser.add_argument("--compute-dtype", choices=["bfloat16", "float16"], default="bfloat16")
     parser.add_argument("--cuda-graphs", choices=["auto", "on", "off"], default="auto")
     args = parser.parse_args()
-    settings = RuntimeSettings(cuda_graphs=args.cuda_graphs)
+    settings = RuntimeSettings(
+        attention_backend=args.attention,
+        compute_dtype=args.compute_dtype,
+        cuda_graphs=args.cuda_graphs,
+    )
     engine = Qwen3TTSEngine.load(args.checkpoint, settings)
     try:
         _, telemetry = engine.generate_voice_design(
@@ -31,7 +41,9 @@ def main() -> int:
             top_p=1.0,
             repetition_penalty=1.05,
         )
-        print(json.dumps(telemetry.to_dict(), indent=2, sort_keys=True))
+        result = telemetry.to_dict()
+        result["runtime"] = engine.diagnostics
+        print(json.dumps(result, indent=2, sort_keys=True))
     finally:
         engine.unload()
     return 0

@@ -12,7 +12,9 @@ from ..config import RuntimeSettings
 from ..errors import BackendUnavailableError, CompatibilityError
 from ..logging_utils import log_event
 from .backends import inspect_backends, require_cuda_int8_backend
+from .flash_graph import inspect_flash_kvcache
 from .loader import load_quantized_base_model, read_quantized_metadata
+from .linear import quant_backend_scope
 from .memory import MemoryPlan, build_memory_plan
 from .telemetry import GenerationTelemetry
 
@@ -73,15 +75,23 @@ def _populate_sample_rate(base_model) -> int | None:
 
 
 def _make_fast_wrapper(base_model, settings: RuntimeSettings):
-    from faster_qwen3_tts import FasterQwen3TTS
     from faster_qwen3_tts.predictor_graph import PredictorGraph
     from faster_qwen3_tts.talker_graph import TalkerGraph
+    from .optimized_generate import optimized_wrapper_class
 
     _populate_sample_rate(base_model)
     talker = base_model.model.talker
     talker_config = base_model.model.config.talker_config
     predictor = talker.code_predictor
     pred_config = predictor.model.config
+    runtime_path = f"static_cache_{settings.attention_backend}_cuda_graph"
+    if settings.attention_backend == "flash_attention_2":
+        from .flash_graph import graph_classes, install_flash_kvcache_attention
+
+        installed = install_flash_kvcache_attention(talker.model, predictor.model)
+        PredictorGraph, TalkerGraph = graph_classes()
+        runtime_path = "flash_kvcache_cuda_graph"
+        log.info("installed %d instance-local FlashAttention KV-cache adapters", installed)
     predictor_graph = PredictorGraph(
         predictor,
         pred_config,
@@ -122,6 +132,7 @@ def _make_fast_wrapper(base_model, settings: RuntimeSettings):
             predictor_cache_configured,
             talker_cache_configured,
         )
+    FasterQwen3TTS = optimized_wrapper_class()
     return FasterQwen3TTS(
         base_model=base_model,
         predictor_graph=predictor_graph,
@@ -129,7 +140,23 @@ def _make_fast_wrapper(base_model, settings: RuntimeSettings):
         device="cuda",
         dtype=_dtype(settings.compute_dtype),
         max_seq_len=settings.max_sequence_length,
-    )
+    ), runtime_path
+
+
+def _restore_dynamic_flash_attention(base_model) -> None:
+    if base_model is None:
+        return
+    try:
+        from .flash_graph import uninstall_flash_kvcache_attention
+
+        talker = base_model.model.talker
+        restored = uninstall_flash_kvcache_attention(
+            talker.model, talker.code_predictor.model
+        )
+        if restored:
+            log.info("restored %d upstream FlashAttention modules after graph fallback", restored)
+    except Exception as exc:
+        log.warning("could not restore upstream FlashAttention modules after fallback: %s", exc)
 
 
 @dataclass
@@ -169,19 +196,23 @@ class Qwen3TTSEngine:
         text_hidden = int(talker_cfg.get("text_hidden_size", config.get("text_hidden_size", 2048)))
         text_bytes = text_vocab * text_hidden * 2
         gpu_main_bytes = max(0, checkpoint_bytes - text_bytes)
-        flash_graph_incompatible = settings.attention_backend == "flash_attention_2"
-        if flash_graph_incompatible and settings.cuda_graphs == "on":
-            raise CompatibilityError(
-                "FlashAttention 2 cannot be combined with the current faster-qwen3-tts "
-                "static CUDA-graph masks. Select CUDA graphs auto/off; auto keeps real "
-                "FlashAttention on the dynamic upstream path."
-            )
-        if flash_graph_incompatible and settings.cuda_graphs == "auto":
-            log.warning(
-                "CUDA graphs disabled for flash_attention_2: the predictor graph uses "
-                "a fixed 4D StaticCache mask that FlashAttention 2 cannot unpad safely"
-            )
-        wants_graphs = settings.cuda_graphs in {"auto", "on"} and not flash_graph_incompatible
+        wants_graphs = settings.cuda_graphs in {"auto", "on"}
+        flash_kvcache = None
+        graph_fallback_reason = None
+        if wants_graphs and settings.attention_backend == "flash_attention_2":
+            flash_kvcache = inspect_flash_kvcache()
+            if not flash_kvcache.available:
+                graph_fallback_reason = flash_kvcache.reason
+                if settings.cuda_graphs == "on":
+                    raise CompatibilityError(
+                        "FlashAttention CUDA graphs require flash_attn_with_kvcache: "
+                        f"{flash_kvcache.reason}"
+                    )
+                log.warning(
+                    "FlashAttention KV-cache graph unavailable; using dynamic FA2: %s",
+                    flash_kvcache.reason,
+                )
+                wants_graphs = False
         plan = build_memory_plan(
             free_bytes,
             gpu_main_bytes,
@@ -194,14 +225,21 @@ class Qwen3TTSEngine:
         base, metadata, _ = load_quantized_base_model(checkpoint, settings, device)
         generator = base
         active_graphs = False
+        dynamic_attention_path = (
+            "transformers_flash_attention_2_dynamic"
+            if settings.attention_backend == "flash_attention_2"
+            else f"transformers_{settings.attention_backend}_dynamic"
+        )
+        graph_attention_candidate = None
         if wants_graphs:
             try:
-                generator = _make_fast_wrapper(base, settings)
+                generator, graph_attention_candidate = _make_fast_wrapper(base, settings)
                 active_graphs = True
             except Exception as exc:
+                _restore_dynamic_flash_attention(base)
                 if settings.cuda_graphs == "on":
                     raise CompatibilityError(f"CUDA graph runtime initialization failed: {exc}") from exc
-                log.warning("CUDA graphs unavailable in auto mode; using upstream static-cache path: %s", exc)
+                log.warning("CUDA graphs unavailable in auto mode; using upstream dynamic path: %s", exc)
 
         diagnostics = status.to_dict()
         diagnostics.update(
@@ -210,14 +248,15 @@ class Qwen3TTSEngine:
                 "quantization": metadata.quantization_format,
                 "compute_dtype": settings.compute_dtype,
                 "codec_dtype": settings.codec_dtype,
-                "cuda_graphs_active": active_graphs,
+                "cuda_graphs_initialized": active_graphs,
+                "cuda_graphs_active": False,
+                "attention_execution_path": dynamic_attention_path,
+                "attention_execution_path_candidate": graph_attention_candidate,
                 "memory_plan": plan.to_dict(),
             }
         )
-        if flash_graph_incompatible:
-            diagnostics["cuda_graphs_disabled_reason"] = (
-                "flash_attention_2_static_cache_mask_incompatible"
-            )
+        if graph_fallback_reason:
+            diagnostics["cuda_graphs_disabled_reason"] = graph_fallback_reason
         log_event(
             "runtime_loaded",
             gpu=status.gpu,
@@ -230,7 +269,9 @@ class Qwen3TTSEngine:
             quantization=metadata.quantization_format,
             compute_dtype=settings.compute_dtype,
             codec_dtype=settings.codec_dtype,
-            cuda_graphs=active_graphs,
+            cuda_graphs="pending_capture" if active_graphs else False,
+            attention_execution_path=dynamic_attention_path,
+            attention_execution_path_candidate=graph_attention_candidate,
             memory_plan=plan.to_dict(),
         )
         return cls(checkpoint, settings, base, generator, plan, metadata, diagnostics, active_graphs)
@@ -247,8 +288,22 @@ class Qwen3TTSEngine:
                 predictor = self.generator.predictor_graph
                 predictor.temperature, predictor.top_k, predictor.top_p = predictor_sampling
                 self._graph_sampling_signature = predictor_sampling
-                self.generator.warmup(prefill_len=min(prompt_tokens, self.settings.max_sequence_length - 2))
+                with quant_backend_scope(self.settings.kernel_backend):
+                    self.generator.warmup(
+                        prefill_len=min(prompt_tokens, self.settings.max_sequence_length - 2)
+                    )
+                self.diagnostics["cuda_graphs_active"] = True
+                self.diagnostics["attention_execution_path"] = self.diagnostics.get(
+                    "attention_execution_path_candidate"
+                )
+                log_event(
+                    "cuda_graphs_captured",
+                    attention_execution_path=self.diagnostics["attention_execution_path"],
+                    compute_dtype=self.settings.compute_dtype,
+                    kernel_backend=self.settings.kernel_backend,
+                )
             except Exception as exc:
+                _restore_dynamic_flash_attention(self.base_model)
                 if self.settings.cuda_graphs == "on":
                     raise CompatibilityError(f"CUDA graph capture failed: {exc}") from exc
                 log.warning("CUDA graph capture failed in auto mode; disabling graphs: %s", exc)
@@ -260,7 +315,13 @@ class Qwen3TTSEngine:
 
                 torch.cuda.empty_cache()
                 self.diagnostics["cuda_graphs_active"] = False
+                self.diagnostics["cuda_graphs_initialized"] = False
                 self.diagnostics["cuda_graph_error"] = str(exc)
+                self.diagnostics["attention_execution_path"] = (
+                    "transformers_flash_attention_2_dynamic"
+                    if self.settings.attention_backend == "flash_attention_2"
+                    else f"transformers_{self.settings.attention_backend}_dynamic"
+                )
 
     def generate_voice_design(
         self,
@@ -291,22 +352,25 @@ class Qwen3TTSEngine:
             self.warmup(predictor_sampling=signature)
             torch.cuda.reset_peak_memory_stats()
             started = time.perf_counter()
-            wavs, sample_rate = self.generator.generate_voice_design(
-                text=text,
-                instruct=instruction,
-                language=language,
-                max_new_tokens=min(max_new_tokens, self.settings.max_sequence_length),
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                do_sample=True,
-                repetition_penalty=repetition_penalty,
-            )
+            with quant_backend_scope(self.settings.kernel_backend):
+                wavs, sample_rate = self.generator.generate_voice_design(
+                    text=text,
+                    instruct=instruction,
+                    language=language,
+                    max_new_tokens=min(max_new_tokens, self.settings.max_sequence_length),
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    do_sample=True,
+                    repetition_penalty=repetition_penalty,
+                )
             torch.cuda.synchronize()
             elapsed = time.perf_counter() - started
             waveform = torch.as_tensor(wavs[0], dtype=torch.float32, device="cpu").flatten()
             audio_seconds = waveform.numel() / float(sample_rate)
             steady = torch.cuda.memory_allocated()
+            timing = getattr(self.generator, "_last_timing", {})
+            steps = int(timing.get("steps", 0))
             telemetry = GenerationTelemetry(
                 total_seconds=elapsed,
                 audio_seconds=audio_seconds,
@@ -318,6 +382,15 @@ class Qwen3TTSEngine:
                 attention_backend=self.settings.attention_backend,
                 kernel_backend=self.settings.kernel_backend,
                 seed=seed,
+                acoustic_steps=steps,
+                prefill_seconds=float(timing.get("prefill_ms", 0.0)) / 1000.0,
+                decode_seconds=float(timing.get("decode_s", 0.0)),
+                codec_seconds=float(timing.get("codec_s", 0.0)),
+                acoustic_frames_per_second=(
+                    steps / float(timing["decode_s"])
+                    if steps and float(timing.get("decode_s", 0.0)) > 0
+                    else 0.0
+                ),
             )
             return {"waveform": waveform[None, None, :], "sample_rate": int(sample_rate)}, telemetry
 

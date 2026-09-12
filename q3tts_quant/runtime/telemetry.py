@@ -16,6 +16,11 @@ class GenerationTelemetry:
     attention_backend: str = ""
     kernel_backend: str = ""
     seed: int = 0
+    acoustic_steps: int = 0
+    prefill_seconds: float = 0.0
+    decode_seconds: float = 0.0
+    codec_seconds: float = 0.0
+    acoustic_frames_per_second: float = 0.0
 
     def to_dict(self):
         return asdict(self)
@@ -28,4 +33,3 @@ class WallTimer:
 
     def __exit__(self, *args):
         self.elapsed = time.perf_counter() - self.started
-

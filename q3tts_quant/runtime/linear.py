@@ -1,9 +1,42 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
+from functools import lru_cache
 
 import torch
 from torch import nn
+
+
+_ACTIVE_QUANT_BACKEND: ContextVar[str | None] = ContextVar("q3tts_quant_backend", default=None)
+
+
+@lru_cache(maxsize=1)
+def _comfy_kitchen():
+    try:
+        import comfy_kitchen
+    except ImportError as exc:
+        raise RuntimeError("comfy-kitchen is required for W8A8 ConvRot inference") from exc
+    return comfy_kitchen
+
+
+@contextmanager
+def quant_backend_scope(backend: str):
+    """Select Comfy Kitchen once for a complete warmup or generation.
+
+    Entering ``use_backend`` for every linear adds Python and registry overhead
+    hundreds of times per acoustic frame.  The engine owns one outer scope;
+    individual modules retain a safe standalone fallback.
+    """
+
+    kitchen = _comfy_kitchen()
+    context = kitchen.use_backend(backend) if backend != "auto" else nullcontext()
+    token = _ACTIVE_QUANT_BACKEND.set(backend)
+    try:
+        with context:
+            yield
+    finally:
+        _ACTIVE_QUANT_BACKEND.reset(token)
 
 
 class W8A8ConvRotLinear(nn.Module):
@@ -34,10 +67,17 @@ class W8A8ConvRotLinear(nn.Module):
             self.register_parameter("bias", None)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        try:
-            import comfy_kitchen
-        except ImportError as exc:
-            raise RuntimeError("comfy-kitchen is required for W8A8 ConvRot inference") from exc
+        comfy_kitchen = _comfy_kitchen()
+        if _ACTIVE_QUANT_BACKEND.get() is not None:
+            return comfy_kitchen.int8_linear(
+                input,
+                self.weight,
+                self.weight_scale,
+                self.bias,
+                out_dtype=self.out_dtype,
+                convrot=True,
+                convrot_groupsize=self.group_size,
+            )
         backend = self.kernel_backend
         context = comfy_kitchen.use_backend(backend) if backend != "auto" else nullcontext()
         with context:
@@ -79,4 +119,3 @@ class CPUGatherEmbedding(nn.Module):
     def _apply(self, fn, recurse=True):
         # ComfyUI lifecycle moves must not promote the 593.5 MiB prompt table to VRAM.
         return self
-

@@ -24,8 +24,8 @@ This selection follows the actual batch-1 decode shapes. Current Comfy Kitchen C
 | FP16 codec | Confirmed available | Selected |
 | CPU text-embedding gather | Likely viable | Implemented to reclaim about 594 MiB of VRAM |
 | Static Talker KV cache | Confirmed available in faster-qwen3-tts | Selected with fixed maximum length |
-| Talker and Predictor CUDA graphs | Likely viable | Auto capture with observable fallback; `on` is strict |
-| FlashAttention 2 | Requires benchmark | Optional; SDPA is the conservative default for short-query decode |
+| Talker and Predictor CUDA graphs | Confirmed available upstream | Auto capture with observable fallback; `on` is strict |
+| FlashAttention 2 KV-cache graphs | Likely viable | Instance-local adapter uses fused cache update; requires an on-device validation |
 | torch.compile | Requires benchmark | Excluded from the first path due graph overlap and compile memory |
 | W4A16 AWQ | Requires benchmark | Deferred |
 | W4A8 / W4A4 | Requires quality and speed benchmark | Deferred |
@@ -44,3 +44,25 @@ The implementation was aligned to these inspected revisions:
 - faster-qwen3-tts: `e2a215f61984c0e72a242f8dd72333338e7672f4`
 
 Feature detection and explicit errors protect the load path when these projects evolve.
+
+## FlashAttention graph design
+
+Dynamic prompt prefill remains on Qwen/Transformers. For graph decode, the runtime wraps only the
+33 attention instances used by the 28-layer Talker and 5-layer Code Predictor. A StaticCache call
+uses FlashAttention 2's `flash_attn_with_kvcache` interface directly. Qwen applies its own RoPE
+before the call; FA2 receives the new K/V tensors, the preallocated cache, and an INT32 CUDA
+sequence-length tensor. This fuses the cache write with attention and avoids the incompatible
+variable-length unpadding path.
+
+The graph subclasses also eliminate the Talker's table of one full attention mask per possible
+sequence position and the per-frame mask copy. The Predictor passes explicit no-mask entries because
+causality and sliding-window bounds are supplied to the KV-cache kernel. Padded batch input is
+rejected explicitly; the optimized VoiceDesign node targets batch size 1.
+
+## W8A8 decode-loop tuning
+
+Comfy Kitchen's backend override is entered once per warmup or generation rather than once per
+quantized Linear call. The VoiceDesign loop keeps a persistent codec output/history buffer, reuses
+the two-token Predictor input, returns the Predictor's captured output buffer without cloning, and
+uses a history view for repetition penalty. Sampling retains the one necessary per-frame EOS host
+check, so generated length and deterministic seed behavior remain unchanged.
