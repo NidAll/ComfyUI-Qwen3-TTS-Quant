@@ -66,6 +66,23 @@ CPU memory use during conversion.
 The project does not pin or replace PyTorch, torchvision, torchaudio, CUDA, or
 Transformers. Installation uses the environment that already runs ComfyUI.
 
+### Supported Transformers combination
+
+`qwen-tts` 0.1.1 pins `transformers` 4.57.3, while `qwen-tts-hf` and
+`faster-qwen3-tts` currently require `transformers` 5.15.1 or later. The two
+sides cannot be resolved in one environment, and each side fails differently
+(see issue #1).
+
+The supported combination for this node is:
+
+- `transformers` 4.57.3
+- `qwen-tts` 0.1.1
+- An environment that does not also install `qwen-tts-hf` or `faster-qwen3-tts`
+
+Mixing those 5.x-only packages into the same environment is not supported
+until upstream relaxes the pin. This will be revisited if upstream relaxes
+the pin or if a compatibility shim becomes warranted.
+
 ## Installation
 
 Clone the repository under ComfyUI's `custom_nodes` directory:
